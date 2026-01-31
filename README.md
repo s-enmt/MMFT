@@ -1,4 +1,4 @@
-# MultiModal Fine-tuning with Synthetic Captions
+# Multimodal Fine-tuning with Synthetic Captions
 This is a pytorch implementation of the following paper [[arXiv]](https://arxiv.org/abs/2601.21426):  
 ![overview](./image/overview.png)
 
