@@ -6,16 +6,20 @@ Please read license.txt before reading or using the files.
 
 # Running Experiments
 
-## 1. Generate captions
-Generate synthetic captions for the dataset using an MLLM.
+## Prerequisites
+If you want to use our pre-generated captions, download them from [here](https://drive.google.com/drive/folders/1jGSswRMqZnaHcfAiGjQqlyWtem5BdWcN).
+If you plan to use existing captions, you can skip steps 1 and 2 below.
+
+## 1. Generate captions (Optional)
+Generate synthetic captions for the dataset using an MLLM. Skip this step if you're using pre-generated captions.
 ```bash
 python generate_captions.py --dataset Pet --prompt_type VisualCaption
 python generate_captions.py --dataset Pet --prompt_type ShapeCaption
 python generate_captions.py --dataset Pet --prompt_type TextureCaption
 ```
 
-## 2. Merge captions
-Combine multiple caption files into a single JSON file.
+## 2. Merge captions (Optional)
+Combine multiple caption files into a single JSON file. Skip this step if you're using pre-generated captions.
 ```bash
 python merge_captions.py \
   -i captions/gemini-2.5-flash-lite/Pet/VisualCaption.json \
