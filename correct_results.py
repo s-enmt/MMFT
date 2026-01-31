@@ -41,65 +41,24 @@ class MethodKey:
         self.epochs = args.get('epochs', 0)
         self.batch_size = args.get('batch_size', 0)
         self.lr = args.get('lr', 0)
-        self.image_caption = args.get('image_caption')
-        self.eval_image_caption = args.get('eval_image_caption')
-        self.label_description = args.get('label_description')
-        self.eval_label_description = args.get('eval_label_description')
-        self.add_class_prefix = args.get('add_class_prefix')
-        self.unicl = args.get('unicl')
-        self.unicl_simple = args.get('unicl_simple')
-        self.loss = args.get('loss')
-        self.eval_method = args.get('eval_method', 'class_average')
-        self.mllm = None
-
-        if self.image_caption and self.label_description:
-            self.method_name = 'Dual'
-        elif self.image_caption:
-            self.method_name = 'IC'
-        elif self.label_description:
-            self.method_name = 'LD'
-        else:
-            self.method_name = 'Baseline'
-        
-        if self.image_caption:
-            self.mllm = self.image_caption.split('/')[-2]
-            self.image_caption = os.path.basename(self.image_caption)
-            if "ImageNet" in self.image_caption:
-                self.image_caption = '_'.join(self.image_caption.split('_')[2:])
-            else:
-                self.image_caption = '_'.join(self.image_caption.split('_')[1:])
-        if self.eval_image_caption:
-            self.eval_image_caption = os.path.basename(self.eval_image_caption)
-            if "ImageNet" in self.eval_image_caption:
-                self.eval_image_caption = '_'.join(self.eval_image_caption.split('_')[2:])
-            else:
-                self.eval_image_caption = '_'.join(self.eval_image_caption.split('_')[1:])
-        if self.label_description:
-            self.mllm = self.label_description.split('/')[-2]
-            self.label_description = os.path.basename(self.label_description)
-            self.label_description = '_'.join(self.label_description.split('_')[1:])
-        if self.eval_label_description:
-            self.eval_label_description = os.path.basename(self.eval_label_description)
-            self.eval_label_description = '_'.join(self.eval_label_description.split('_')[1:])
+        self.captions = args.get('captions')
+        self.add_class_template = args.get('add_class_template')
+        self.w = args.get('w')
+        self.method_name = 'MMFT'
         
         self.method_args = {
-            'mllm': self.mllm,
-            'image_caption': self.image_caption,
-            'eval_image_caption': self.eval_image_caption,
-            'label_description': self.label_description,
-            'eval_label_description': self.eval_label_description,
-            'eval_image_caption': self.eval_image_caption,
-            'add_class_prefix': self.add_class_prefix,
-            'unicl': self.unicl,
-            'unicl_simple': self.unicl_simple,
-            'loss': self.loss,
-            'eval_method': self.eval_method,
+            'lr': self.lr,
+            'batch_size': self.batch_size,
+            'epochs': self.epochs,
+            'captions': self.captions,
+            'add_class_template': self.add_class_template,
+            'w': self.w,
         }
         self.method_args = {k: v for k, v in self.method_args.items() if v is not None}
 
     def get_main_config(self) -> str:
         """Get main method configuration (method and prompt size)"""
-        return f"{self.method_name}_lr{self.lr}_bs{self.batch_size}_e{self.epochs}"
+        return f"{self.method_name}"
 
     def get_hyper_params(self) -> str:
         """Get hyperparameter configuration"""
@@ -150,9 +109,6 @@ def collect_results(args) -> Tuple[List[str], List[str], Dict]:
     all_args = [exp_args for exp_args, _ in all_data]
     datasets = sorted(get_unique_values(all_args, 'dataset'))
     models = sorted(get_unique_values(all_args, 'model_name'))
-
-    # Exculde
-    datasets = [ds for ds in datasets if ds not in args.exclude]
     
     # Organize results by model, method, and dataset
     results = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
@@ -258,17 +214,12 @@ def main():
     parser = argparse.ArgumentParser(description='Collect and summarize experiment results')
     parser.add_argument('--input_dir', required=True, 
                        help='Directory containing experiment results')
-    parser.add_argument('-e', '--exclude', nargs='+', default=[], help='exclude dataset')
     args = parser.parse_args()
 
    
     # Collect results
     datasets, models, results, num_results = collect_results(args)
-    
-    if args.exclude != []:
-        output_path = os.path.join(args.input_dir, 'results_ex.tex')
-    else:
-        output_path = os.path.join(args.input_dir, 'results.tex')
+    output_path = os.path.join(args.input_dir, 'results.tex')
 
     # Generate LaTeX document and save to file
     with open(output_path, 'w') as f:
