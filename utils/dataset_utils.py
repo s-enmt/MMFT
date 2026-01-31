@@ -712,31 +712,8 @@ class CaptionDataset(Dataset):
             # Get corresponding caption for individual image
             img_filename = self.image_filenames[idx]
             caption = self.caption_data[img_filename]
-            if self.add_class_template:
-                caption = f"a photo of a {class_name}. {caption}"
-               
-        return image, caption, label
-
-
-class AugMultiCaptionDataset(CaptionDataset):
-    def __getitem__(self, idx):
-        # Get actual dataset index from valid_indices
-        dataset_idx = self.valid_indices[idx]
-        
-        # Get images from train_dataset
-        image, _ = self.train_dataset[dataset_idx]
-        label = self.labels[idx]
-        class_name = self.class_names[label]
-
-        if self.caption_type == "class_label":
-            # Use class-based caption
-            caption = f"a photo of a {class_name}."
-                            
-        elif self.caption_type == "caption":
-            # Get corresponding caption for individual image
-            img_filename = self.image_filenames[idx]
-            captions = self.caption_data[img_filename]
-            caption = random.choice(captions)
+            if type(caption) == list:
+                caption = random.choice(caption)
             if self.add_class_template:
                 caption = f"a photo of a {class_name}. {caption}"
                
