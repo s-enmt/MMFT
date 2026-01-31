@@ -6,9 +6,7 @@ Please read license.txt before reading or using the files.
 
 # Running Experiments
 
-## Workflow
-
-### 1. Generate captions
+## 1. Generate captions
 Generate synthetic captions for the dataset using an MLLM.
 ```bash
 python generate_captions.py --dataset Pet --prompt_type VisualCaption
@@ -16,7 +14,7 @@ python generate_captions.py --dataset Pet --prompt_type ShapeCaption
 python generate_captions.py --dataset Pet --prompt_type TextureCaption
 ```
 
-### 2. Merge captions
+## 2. Merge captions
 Combine multiple caption files into a single JSON file.
 ```bash
 python merge_captions.py \
@@ -26,7 +24,7 @@ python merge_captions.py \
   -o captions/gemini-2.5-flash-lite/Pet/VisualShapeTextureCaption.json
 ```
 
-### 3. Fine-tune
+## 3. Fine-tune
 Fine-tune the model using the generated captions.
 ```bash
 python main.py \
@@ -37,7 +35,7 @@ python main.py \
   --w 0.1
 ```
 
-### 4. Aggregate results
+## 4. Aggregate results
 Collect and summarize experimental results.
 ```bash
 python collect_results.py --dir output/
