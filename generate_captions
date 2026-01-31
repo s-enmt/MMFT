@@ -15,7 +15,7 @@ import random
 
 
 PROMPT = {
-    "visualCaption": "To differentiate this {class_name} photo from other {domain} photos, describe its primary visual characteristics based on the photo in {words} words.",
+    "VisualCaption": "To differentiate this {class_name} photo from other {domain} photos, describe its primary visual characteristics based on the photo in {words} words.",
     "TextureCaption": "To differentiate this {class_name} photo from other {domain} photos, describe its primary texture characteristics based on the photo in {words} words.",
     "ShapeCaption": "To differentiate this {class_name} photo from other {domain} photos, describe its primary shape characteristics based on the photo in {words} words.",
     "ContextCaption": "To differentiate this {class_name} photo from other {domain} photos, describe its primary context characteristics based on the photo in {words} words.",
@@ -62,7 +62,7 @@ def parse_args():
     
     # Prompt settings
     parser.add_argument('--prompt_type', type=str, 
-                       default="visualCaption",
+                       default="VisualCaption",
                        help='Prompt type for generating image captions')
     
     return parser.parse_args()
@@ -295,8 +295,7 @@ def main(args):
     print(f"Dataset loading completed. Number of images: {len(dataset)}")
 
     # Load existing caption data
-    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    Path(os.path.join(args.output_dir, args.mllm)).mkdir(parents=True, exist_ok=True)
+    Path(os.path.join(args.output_dir, args.mllm, args.dataset)).mkdir(parents=True, exist_ok=True)
     output_path = os.path.join(
         args.output_dir, 
         args.mllm,
