@@ -1,0 +1,44 @@
+Bootstrap: docker
+From: nvcr.io/nvidia/pytorch:24.01-py3
+
+%post
+    # Update system packages
+    apt update
+    DEBIAN_FRONTEND=noninteractive apt install -y \
+        ffmpeg \
+        libxdamage1 \
+        git \
+        wget \
+        curl \
+        build-essential
+
+    # Install conda packages via pip (main dependencies)
+    pip install --upgrade pip
+    
+    # Core ML libraries
+    pip install \
+        torch \
+        torchvision \
+        torchaudio \
+        numpy \
+        scipy \
+        pandas \
+        matplotlib \
+        seaborn \
+        pillow 
+    
+    # ML/AI specific packages
+    pip install \
+        timm \
+        open-clip-torch \
+        google-generativeai \
+        h5py \
+        gdown \
+        datasets \
+        openai \
+        lmdb
+
+    
+    # Utility packages
+    pip install \
+        tqdm \
