@@ -113,7 +113,7 @@ class CLIPClassifier(nn.Module):
                     avg_feature = avg_feature / avg_feature.norm(dim=-1, keepdim=True)
                     self.text_features.append(avg_feature)
                     
-                print(f"Class '{self.class_names[class_idx]}': averaged {len(captions)} captions")
+                # print(f"Class '{self.class_names[class_idx]}': averaged {len(captions)} captions")
             else:
                 # Fallback to class template if no captions for this class
                 fallback_prompt = f"a photo of a {self.class_names[class_idx]}"
@@ -123,7 +123,7 @@ class CLIPClassifier(nn.Module):
                     feature = feature / feature.norm(dim=-1, keepdim=True)
                     self.text_features.append(feature)
                     
-                print(f"Class '{self.class_names[class_idx]}': using fallback template (no captions found)")
+                # print(f"Class '{self.class_names[class_idx]}': using fallback template (no captions found)")
         
         # Stack all features
         self.text_features = torch.cat(self.text_features, dim=0)
@@ -137,6 +137,34 @@ class CLIPClassifier(nn.Module):
         logits = (image_features @ self.text_features.T) * self.clip_model.logit_scale.exp()
 
         return logits
+
+
+class CLIPClassifierEnsemble(nn.Module):
+    """FLYP-style classifier: averaged text features over an 80-prompt ensemble."""
+    def __init__(self, clip_model, model_name, class_names, device, templates=None):
+        super().__init__()
+        self.clip_model = clip_model
+        self.device = device
+        self.tokenizer = open_clip.get_tokenizer(model_name)
+        if templates is None:
+            from utils.prompt_templates import IMAGENET_TEMPLATES
+            templates = IMAGENET_TEMPLATES
+
+        text_features = []
+        with torch.no_grad():
+            for name in class_names:
+                texts = self.tokenizer([t.format(name) for t in templates]).to(device)
+                emb = clip_model.encode_text(texts)
+                emb = emb / emb.norm(dim=-1, keepdim=True)
+                emb = emb.mean(dim=0)
+                emb = emb / emb.norm()
+                text_features.append(emb)
+        self.text_features = torch.stack(text_features)
+
+    def forward(self, images):
+        image_features = self.clip_model.encode_image(images)
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+        return (image_features @ self.text_features.T) * self.clip_model.logit_scale.exp()
 
 
 def contrastive_loss(logits_per_image, logits_per_text):

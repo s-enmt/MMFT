@@ -7,8 +7,7 @@ from typing import Dict
 
 def create_experiment_hash(args: argparse.Namespace) -> str:
     """Generate hash from experiment settings"""
-    args_dict = vars(args)
-    args_str = json.dumps(args_dict, sort_keys=True)
+    args_str = json.dumps(vars(args), sort_keys=True)
     return hashlib.md5(args_str.encode()).hexdigest()[:8]
 
 

@@ -8,12 +8,14 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import CosineAnnealingLR
-import open_clip
 from tqdm import tqdm
 import numpy as np
 import gc
 
-from utils import dataset_utils, model_utils, experiment_utils
+# Heavy deps (open_clip -> timm/transformers, torchvision via dataset_utils) are
+# imported lazily inside main()/train_epoch so an already-completed run can exit
+# via setup_experiment_dir() without paying that import cost.
+from utils import experiment_utils
 
 
 def parse_args():
@@ -49,6 +51,13 @@ def parse_args():
                        help='Random seed')
     parser.add_argument('--min_lr_ratio', type=float, default=0.0,
                        help='Minimum learning rate ratio for cosine annealing')
+    parser.add_argument('--no_amp', action='store_true',
+                       help='Disable AMP and train in fp32 (no autocast, no GradScaler). '
+                            'Removes loss-scaling artifacts entirely, at the cost of speed')
+    parser.add_argument('--init_scale', type=float, default=65536.0,
+                       help='Initial AMP GradScaler scale (torch default 65536.0). '
+                            'Lower it so short few-shot runs do not lose their first '
+                            'optimizer steps to overflow-induced step skipping')
     
     # Output settings
     parser.add_argument('--output_dir', type=str, default='./output',
@@ -59,9 +68,12 @@ def parse_args():
                        help='Image caption JSON file for training')
     parser.add_argument('--add_class_template', action='store_true',
                    help='Add "a photo of a {class_name}. " prefix to caption')
-    parser.add_argument('--w', default=0.1,
+    parser.add_argument('--w', type=float, default=0.1,
                    help='Loss weight')
-    
+    parser.add_argument('--prompt_ensemble', action='store_true',
+                   help='FLYP-style 80-prompt ensemble: random template at training, '
+                        'averaged embeddings at inference. Only effective with --captions class_label')
+
     return parser.parse_args()
 
 
@@ -112,6 +124,8 @@ def supcon_style_loss(logits, same_class_mask):
 
 def train_epoch(model, dataloader, optimizer, scheduler, scaler, device, epoch, args):
     """Train for one epoch with contrastive learning"""
+    import open_clip
+    from utils import model_utils
     model.train()
     total_loss = 0
     tokenizer = open_clip.get_tokenizer(args.model_name)
@@ -126,7 +140,7 @@ def train_epoch(model, dataloader, optimizer, scheduler, scaler, device, epoch, 
         optimizer.zero_grad()
         
         # Use autocast for forward pass
-        with autocast():
+        with autocast(enabled=not args.no_amp):
             logits_per_image, logits_per_text = model(images, texts)
 
             sup_loss = sup_ft_loss(logits_per_image, logits_per_text, labels)
@@ -154,7 +168,7 @@ def train_epoch(model, dataloader, optimizer, scheduler, scaler, device, epoch, 
     return total_loss / len(dataloader)
 
 
-def validate(model, dataloader, criterion, device, epoch=None):
+def validate(model, dataloader, criterion, device, epoch=None, amp=True):
     """Validation using classification"""
     model.eval()
     total_loss = 0
@@ -168,7 +182,7 @@ def validate(model, dataloader, criterion, device, epoch=None):
             images, labels = images.to(device), labels.to(device)
             
             # Use autocast for forward pass
-            with autocast():
+            with autocast(enabled=amp):
                 outputs = model(images)
                 loss = criterion(outputs, labels)
             
@@ -193,16 +207,24 @@ def main():
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     
-    # Create experiment directory
+    # Create experiment directory (exits here if this run is already completed,
+    # before the heavy imports below are paid).
     exp_dir = experiment_utils.setup_experiment_dir(args)
     print(f"Experiment directory: {exp_dir}")
-    
+
+    # Heavy imports, only reached for runs that actually execute.
+    import open_clip
+    from utils import dataset_utils, model_utils
+
     # Device setup
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    if device.type == 'cuda':
+    amp_enabled = device.type == 'cuda' and not args.no_amp
+    if amp_enabled:
         print("AMP (Automatic Mixed Precision) enabled")
+    elif args.no_amp:
+        print("AMP disabled by --no_amp: training in fp32")
     else:
         print("Warning: CUDA not available, AMP will not be effective")
 
@@ -225,12 +247,13 @@ def main():
     )
     
     # Load caption data and determine caption type
-    caption_data = dataset_utils.load_caption_data(args.captions, class_names)
+    caption_data = dataset_utils.load_caption_data(args.captions)
     caption_train_dataset = dataset_utils.AugMultiCaptionDataset(
-        train_dataset, 
-        caption_data, 
-        class_names, 
-        add_class_template=args.add_class_template
+        train_dataset,
+        caption_data,
+        class_names,
+        add_class_template=args.add_class_template,
+        prompt_ensemble=args.prompt_ensemble
     )
     filename_to_class = caption_train_dataset.filename_to_class
 
@@ -261,7 +284,7 @@ def main():
     scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=min_lr)
     
     # Initialize GradScaler for AMP
-    scaler = GradScaler()
+    scaler = GradScaler(init_scale=args.init_scale, enabled=not args.no_amp)
     
     print(f"Total training steps: {total_steps}")
     print(f"Initial LR: {args.lr:.2e}, Min LR: {min_lr:.2e}")
@@ -293,12 +316,21 @@ def main():
         )
         
         # Validation with classification on label data
-        eval_model = model_utils.CLIPClassifier(clip_model, args.model_name, class_names, device,
+        if caption_data is None:  # FLYP / class_label
+            if args.prompt_ensemble:
+                eval_model = model_utils.CLIPClassifierEnsemble(
+                    clip_model, args.model_name, class_names, device)
+            else:
+                eval_model = model_utils.CLIPClassifierOriginal(
+                    clip_model, args.model_name, class_names, device)
+        else:
+            eval_model = model_utils.CLIPClassifier(clip_model, args.model_name, class_names, device,
                             caption_data=caption_data,
                             add_class_template=args.add_class_template,
                             filename_to_class=filename_to_class,
                             )
-        val_loss, val_acc = validate(eval_model, val_loader, nn.CrossEntropyLoss(), device, epoch)
+        val_loss, val_acc = validate(eval_model, val_loader, nn.CrossEntropyLoss(), device, epoch,
+                                     amp=amp_enabled)
         
         # Record history
         history['train_loss'].append(train_loss)
@@ -323,14 +355,23 @@ def main():
     # Load best model for final evaluation
     print("Loading best model for final evaluation...")
     clip_model.load_state_dict(torch.load(best_model_path))
-    final_eval_model = model_utils.CLIPClassifier(clip_model, args.model_name, class_names, device,
+    if caption_data is None:  # FLYP / class_label
+        if args.prompt_ensemble:
+            final_eval_model = model_utils.CLIPClassifierEnsemble(
+                clip_model, args.model_name, class_names, device)
+        else:
+            final_eval_model = model_utils.CLIPClassifierOriginal(
+                clip_model, args.model_name, class_names, device)
+    else:
+        final_eval_model = model_utils.CLIPClassifier(clip_model, args.model_name, class_names, device,
                             caption_data=caption_data,
                             add_class_template=args.add_class_template,
                             filename_to_class=filename_to_class,
                             )
     
     # Test evaluation
-    test_loss, test_acc = validate(final_eval_model, test_loader, nn.CrossEntropyLoss(), device)
+    test_loss, test_acc = validate(final_eval_model, test_loader, nn.CrossEntropyLoss(), device,
+                                   amp=amp_enabled)
     history['test_loss'] = test_loss
     history['test_acc'] = test_acc
     
@@ -352,7 +393,7 @@ def main():
         'total_steps': total_steps,
         'final_lr': scheduler.get_last_lr()[0],
         'min_lr': min_lr,
-        'amp_enabled': device.type == 'cuda',
+        'amp_enabled': amp_enabled,
         'training_mode': training_mode,
         'model_name': args.model_name,
         'pretrained': args.pretrained,

@@ -47,7 +47,7 @@ def parse_args():
     # Dataset settings
     parser.add_argument('--dataset', type=str, default='Pet',
                        help='Dataset name')
-    parser.add_argument('--data_root', type=str, default='../dataset',
+    parser.add_argument('--data_root', type=str, default='../datasets',
                        help='Data root directory')
     
     # Output settings
@@ -58,7 +58,11 @@ def parse_args():
     
     # Model settings
     parser.add_argument('--mllm', type=str, default='gemini-2.5-flash-lite',
-                       help='MLLM name.')
+                       help='MLLM name. Supports gemini-*, gpt-*, and local qwen* VLMs.')
+    parser.add_argument('--quant', type=str, default='none', choices=['none', '4bit', '8bit'],
+                       help='Quantization for local models (Qwen). Use 4bit for 16GB GPUs.')
+    parser.add_argument('--max_new_tokens', type=int, default=256,
+                       help='Max new tokens for local models (Qwen).')
     
     # Prompt settings
     parser.add_argument('--prompt_type', type=str, 
@@ -144,11 +148,87 @@ class GeminiModel(BaseModel):
         return resp.text.strip()
 
 
-def build_model(model_name: str) -> BaseModel:
+def _strip_think(text: str) -> str:
+    """Remove <think>...</think> blocks emitted by reasoning models (e.g. Qwen thinking mode)."""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+
+class QwenModel(BaseModel):
+    """Local Qwen vision-language captioner via HuggingFace transformers (no API).
+
+    Handles image-text-to-text Qwen models (e.g. Qwen3.5-9B, Qwen2.5-VL).
+    On 16GB GPUs use --quant 4bit. Requires: transformers, accelerate,
+    (and bitsandbytes for 4bit/8bit).
+    """
+    def __init__(self, model_name: str, quant: str = 'none', max_new_tokens: int = 256):
+        import torch
+        from transformers import AutoProcessor
+        try:
+            from transformers import AutoModelForImageTextToText as VLModel
+        except Exception:
+            from transformers import AutoModelForVision2Seq as VLModel
+
+        self.torch = torch
+        self.max_new_tokens = max_new_tokens
+        self.temperature = 0.2
+
+        quantization_config = None
+        if quant in ('4bit', '8bit'):
+            from transformers import BitsAndBytesConfig
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=(quant == '4bit'),
+                load_in_8bit=(quant == '8bit'),
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_quant_type="nf4",
+            )
+
+        print(f"Loading local Qwen VLM '{model_name}' (quant={quant}). This may take a while...")
+        self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+        self.model = VLModel.from_pretrained(
+            model_name,
+            device_map="auto",
+            torch_dtype=torch.float16,
+            quantization_config=quantization_config,
+            trust_remote_code=True,
+        )
+        self.model.eval()
+
+    def response(self, prompt: str, image: Image.Image) -> str:
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": prompt},
+            ],
+        }]
+        # Prefer disabling thinking mode; fall back if the arg is unsupported.
+        try:
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+        except TypeError:
+            text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True)
+
+        inputs = self.processor(text=[text], images=[image], return_tensors="pt").to(self.model.device)
+        with self.torch.no_grad():
+            generated = self.model.generate(
+                **inputs,
+                max_new_tokens=self.max_new_tokens,
+                do_sample=True,
+                temperature=self.temperature,
+            )
+        trimmed = generated[:, inputs["input_ids"].shape[1]:]
+        out = self.processor.batch_decode(trimmed, skip_special_tokens=True)[0]
+        return _strip_think(out)
+
+
+def build_model(model_name: str, quant: str = 'none', max_new_tokens: int = 256) -> BaseModel:
     if "gpt" in model_name.lower():
         return OpenAIModel(model_name)
     elif "gemini" in model_name.lower():
         return GeminiModel(model_name)
+    elif "qwen" in model_name.lower():
+        return QwenModel(model_name, quant=quant, max_new_tokens=max_new_tokens)
     else:
         raise ValueError(f"Unknown model: {model_name}")
        
@@ -210,7 +290,7 @@ def extract_retry_delay(error_message: str) -> int:
     return 0
 
 
-def generate_image_captions(dataset, captions_data, class_names, model, output_path):
+def generate_image_captions(dataset, captions_data, class_names, model, output_path, logf=None, timings=None):
     processed_count = 0
     for i in tqdm(range(len(dataset)), desc="Generating captions"):
         image_id = dataset_utils.get_filename_from_dataset(dataset, i)
@@ -218,26 +298,33 @@ def generate_image_captions(dataset, captions_data, class_names, model, output_p
         # Skip if caption already exists
         if image_id in captions_data:
             continue
-            
+
         try:
             image, label = dataset[i]
             class_name = class_names[label]
             # Preprocess class name
             class_name = class_name.lower().replace('_', ' ').replace('-', ' ')
             prompt = PROMPT[args.prompt_type].format(
-                    class_name=class_name, 
+                    class_name=class_name,
                     domain=DOMAIN[args.dataset],
                     words=50,
                     )
+            t0 = time.time()
             response = model.response(prompt, image)
+            elapsed = time.time() - t0
             captions_data[image_id] = response
             processed_count += 1
-            
+            if timings is not None:
+                timings.append(elapsed)
+            if logf is not None:
+                logf.write(f"{image_id}\t{class_name}\t{elapsed:.3f}\n")
+                logf.flush()
+
             # Save periodically
             if processed_count % args.save_interval == 0:
                 save_captions_to_file(captions_data, output_path)
-                tqdm.write(f"Saved {len(captions_data)} captions")           
-            
+                tqdm.write(f"Saved {len(captions_data)} captions")
+
         except Exception as e:
             error_message = str(e)
             tqdm.write(f"image_id: {image_id}, label: {label}, class_name: {class_names[label]}")
@@ -246,13 +333,20 @@ def generate_image_captions(dataset, captions_data, class_names, model, output_p
                 # Resize the image to image_size*image_size
                 image_size = random.choice(range(224, 512, 4))
                 resized_image = image.resize((image_size, image_size), Image.Resampling.LANCZOS)
-                
+
                 # Second attempt with resized image
+                t0 = time.time()
                 response = model.response(prompt, resized_image)
+                elapsed = time.time() - t0
                 captions_data[image_id] = response
                 processed_count += 1
+                if timings is not None:
+                    timings.append(elapsed)
+                if logf is not None:
+                    logf.write(f"{image_id}\t{class_name}\t{elapsed:.3f}\t(resized {image_size})\n")
+                    logf.flush()
                 tqdm.write(f"Successfully processed {image_id} after resizing {image_size}*{image_size}.")
-                
+
             except Exception as resize_e:
                 tqdm.write(f"Error even after resizing for {image_id}. Skipping. Error: {resize_e}")
                 time.sleep(extract_retry_delay(resize_e))
@@ -273,7 +367,7 @@ def main(args):
         caption_instruction (str): Instruction text for caption generation
     """
     # Set up model
-    model = build_model(args.mllm)
+    model = build_model(args.mllm, quant=args.quant, max_new_tokens=args.max_new_tokens)
 
     # Load dataset to get class names
     print(f"Loading {args.dataset} dataset...")
@@ -307,19 +401,51 @@ def main(args):
     if initial_count > 0:
         print(f"Loaded {initial_count} existing captions.")
 
+    # Set up timing log
+    log_dir = "caption_generate_log"
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    safe_mllm = args.mllm.replace('/', '_')
+    log_path = os.path.join(log_dir, f"{safe_mllm}_{args.dataset}_{args.prompt_type}_{ts}.log")
+    print(f"Timing log: {log_path}")
+
+    timings = []
+    wall_start = time.time()
+    logf = open(log_path, 'w', encoding='utf-8')
+    logf.write(f"# mllm={args.mllm} dataset={args.dataset} prompt_type={args.prompt_type}\n")
+    logf.write("# image_id\tclass_name\tseconds\n")
+
     # Caption generation (first attempt)
     print(f"\nStarting caption generation (saving every {args.save_interval} items)")
-    generate_image_captions(dataset, captions_data, class_names, model, output_path)
+    generate_image_captions(dataset, captions_data, class_names, model, output_path,
+                            logf=logf, timings=timings)
 
     # Retry processing for failed images
     count = 0
     while len(dataset) != len(captions_data):
         print(f"{len(dataset)-len(captions_data)} images failed to generate captions.")
-        generate_image_captions(dataset, captions_data, class_names, model, output_path)
+        generate_image_captions(dataset, captions_data, class_names, model, output_path,
+                                logf=logf, timings=timings)
 
         count += 1
         if count == 20:
             break
+
+    # Timing summary
+    wall_total = time.time() - wall_start
+    gen_total = sum(timings)
+    n_timed = len(timings)
+    per_image_mean = gen_total / n_timed if n_timed else 0.0
+    summary = (
+        f"# ---- summary ----\n"
+        f"# images_generated={n_timed}\n"
+        f"# per_image_mean_sec={per_image_mean:.3f}\n"
+        f"# generation_total_sec={gen_total:.1f}\n"
+        f"# wall_clock_total_sec={wall_total:.1f}\n"
+    )
+    logf.write(summary)
+    logf.close()
+    print(summary)
 
     # Completion message
     final_count = len(captions_data)

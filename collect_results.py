@@ -1,9 +1,18 @@
 import os
+import re
 import json
 import argparse
 from collections import defaultdict
 import numpy as np
 from typing import Dict, List, Tuple, Set
+
+
+def split_shot(dataset_name: str) -> Tuple[str, int]:
+    """Split 'DTD8shot' -> ('DTD', 8); full-shot names -> (name, 0)."""
+    m = re.search(r'(\d+)shot', dataset_name)
+    if m:
+        return dataset_name[:m.start()] + dataset_name[m.end():], int(m.group(1))
+    return dataset_name, 0
 
 
 def find_completed_experiments(input_dir: str) -> List[str]:
@@ -41,11 +50,20 @@ class MethodKey:
         self.epochs = args.get('epochs', 0)
         self.batch_size = args.get('batch_size', 0)
         self.lr = args.get('lr', 0)
-        self.captions = args.get('captions')
+        # Drop the dataset directory from the caption path (structure:
+        # .../<captioner>/<dataset>/<file>) so the same method over different
+        # datasets collapses into one row (dataset is a column, not a row split).
+        self.captions = self._norm_captions(args.get('captions'))
         self.add_class_template = args.get('add_class_template')
         self.w = args.get('w')
-        self.method_name = 'MMFT'
-        
+        self.prompt_ensemble = args.get('prompt_ensemble', False)
+
+        # Determine method name from args
+        if self.captions in ('class_label', None):
+            self.method_name = 'FLYP(ens)' if self.prompt_ensemble else 'FLYP'
+        else:
+            self.method_name = 'MMFT'
+
         self.method_args = {
             'lr': self.lr,
             'batch_size': self.batch_size,
@@ -53,8 +71,19 @@ class MethodKey:
             'captions': self.captions,
             'add_class_template': self.add_class_template,
             'w': self.w,
+            'prompt_ensemble': self.prompt_ensemble if self.prompt_ensemble else None,
         }
         self.method_args = {k: v for k, v in self.method_args.items() if v is not None}
+
+    @staticmethod
+    def _norm_captions(captions):
+        """Remove the dataset directory so caption paths are dataset-agnostic."""
+        if not captions or captions == 'class_label':
+            return captions
+        parts = captions.replace('\\', '/').split('/')
+        if len(parts) >= 2:
+            del parts[-2]  # the dataset dir sits between captioner and filename
+        return '/'.join(parts)
 
     def get_main_config(self) -> str:
         """Get main method configuration (method and prompt size)"""
@@ -105,20 +134,21 @@ def collect_results(args) -> Tuple[List[str], List[str], Dict]:
         exp_args, test_acc = read_experiment_data(exp_dir)
         all_data.append((exp_args, test_acc))
     
-    # Get unique datasets and models
+    # Get unique models
     all_args = [exp_args for exp_args, _ in all_data]
-    datasets = sorted(get_unique_values(all_args, 'dataset'))
     models = sorted(get_unique_values(all_args, 'model_name'))
-    
-    # Organize results by model, method, and dataset
-    results = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+
+    # Organize results by model, shot, method, and base dataset
+    results = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(list))))
+    datasets_by_shot = defaultdict(set)  # shot -> {base dataset}
     for exp_args, test_acc in all_data:
         model = exp_args['model_name']
-        dataset = exp_args['dataset']
+        base, shot = split_shot(exp_args['dataset'])
         method_key = MethodKey(exp_args)
-        results[model][method_key][dataset].append(test_acc)
-    
-    return datasets, models, results, len(completed_dirs)
+        results[model][shot][method_key][base].append(test_acc)
+        datasets_by_shot[shot].add(base)
+
+    return datasets_by_shot, models, results, len(completed_dirs)
 
 def format_mean_std_error(values: List[float]) -> str:
     """Format mean and standard error in LaTeX format"""
@@ -131,9 +161,9 @@ def format_mean_std_error(values: List[float]) -> str:
     else:
         return f"{mean:.2f} \\fontsize{{5pt}}{{5pt}}\\selectfont{{$\\pm$ {std_error:.2f}}}"
 
-def generate_latex_table(model: str, datasets: List[str], 
-                        model_results: Dict) -> str:
-    """Generate LaTeX table for a specific model"""
+def generate_latex_table(model: str, datasets: List[str],
+                        model_results: Dict, shot: int = 0) -> str:
+    """Generate LaTeX table for a specific model (and shot setting)"""
     # Calculate table width based on number of datasets
     table_width = len(datasets) + 3  # method + hyperparams + datasets + average columns
 
@@ -204,21 +234,22 @@ def generate_latex_table(model: str, datasets: List[str],
     latex += "\\bottomrule\n"
     latex += "\\end{tabular}\n"
     latex += "\\end{adjustbox}\n"
-    latex += f"\\caption{{Results for {model}. * indicates fewer than three experiments.}}\n".replace("_", "\\_")
-    latex += f"\\label{{tab:results_{model}}}\n"
+    shot_str = 'full-shot' if shot == 0 else f'{shot}-shot'
+    latex += f"\\caption{{Results for {model} ({shot_str}). * indicates fewer than three experiments.}}\n".replace("_", "\\_")
+    latex += f"\\label{{tab:results_{model}_{shot}shot}}\n"
     latex += "\\end{table}\n\n"
     
     return latex
 
 def main():
     parser = argparse.ArgumentParser(description='Collect and summarize experiment results')
-    parser.add_argument('--input_dir', required=True, 
+    parser.add_argument('--dir', dest='input_dir', default='output',
                        help='Directory containing experiment results')
     args = parser.parse_args()
 
    
     # Collect results
-    datasets, models, results, num_results = collect_results(args)
+    datasets_by_shot, models, results, num_results = collect_results(args)
     output_path = os.path.join(args.input_dir, 'results.tex')
 
     # Generate LaTeX document and save to file
@@ -231,11 +262,16 @@ def main():
         f.write("\\begin{document}\n\n")
         f.write(f"Found {num_results} completed experiments\n")
         
-        # Generate tables for each model
+        # Generate tables for each model, split by shot setting
         for model in models:
             f.write(f"\\section{{{model}}}\n\n".replace("_", "\\_"))
-            latex_table = generate_latex_table(model, datasets, results[model])
-            f.write(latex_table)
+            for shot in sorted(results[model].keys()):
+                base_datasets = sorted(datasets_by_shot[shot])
+                shot_str = 'full-shot' if shot == 0 else f'{shot}-shot'
+                f.write(f"\\subsection*{{{shot_str}}}\n\n")
+                latex_table = generate_latex_table(
+                    model, base_datasets, results[model][shot], shot)
+                f.write(latex_table)
         
         # Document footer
         f.write("\\end{document}\n")

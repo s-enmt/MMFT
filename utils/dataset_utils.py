@@ -646,11 +646,12 @@ def get_filename_from_dataset(dataset, idx):
 
 class CaptionDataset(Dataset):
     """Dataset for image-caption pairs"""
-    def __init__(self, train_dataset, caption_data, class_names, add_class_template=False):
+    def __init__(self, train_dataset, caption_data, class_names, add_class_template=False, prompt_ensemble=False):
         self.train_dataset = train_dataset
         self.caption_data = caption_data
         self.class_names = class_names
         self.add_class_template = add_class_template
+        self.prompt_ensemble = prompt_ensemble
         
         # Determine caption type based on the length of caption_data
         if caption_data == None:
@@ -706,7 +707,12 @@ class CaptionDataset(Dataset):
 
         if self.caption_type == "class_label":
             # Use class-based caption
-            caption = f"a photo of a {class_name}."
+            if self.prompt_ensemble:
+                # FLYP-style: sample a random template per image from the 80-prompt set
+                from utils.prompt_templates import IMAGENET_TEMPLATES
+                caption = random.choice(IMAGENET_TEMPLATES).format(class_name)
+            else:
+                caption = f"a photo of a {class_name}."
                             
         elif self.caption_type == "caption":
             # Get corresponding caption for individual image
@@ -719,6 +725,9 @@ class CaptionDataset(Dataset):
                
         return image, caption, label
     
+
+AugMultiCaptionDataset = CaptionDataset  # alias referenced by main.py
+
 
 def load_caption_data(caption: str) -> Dict[str, str]:
     """Load caption data from JSON file and determine caption type"""    
